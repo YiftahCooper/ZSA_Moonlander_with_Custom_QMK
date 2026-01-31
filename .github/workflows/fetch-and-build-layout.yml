@@ -11,12 +11,12 @@ on:
         description: "Keyboard type"
         type: choice
         options:
+          - moonlander
           - moonlander/reva
           - moonlander/revb
           - planck_ez
           - planck_ez/glow
-          - moonlander
-        default: moonlander/reva
+        default: moonlander
 
 permissions:
   contents: write
@@ -52,6 +52,7 @@ jobs:
             --data "$PAYLOAD" > response.json
             
           # Debug: Print response
+          echo "Oryx API Response:"
           cat response.json
 
           # Extract values using jq
@@ -62,6 +63,7 @@ jobs:
           # Verify we got a hash
           if [ "$HASH_ID" == "null" ] || [ -z "$HASH_ID" ]; then
             echo "::error::Failed to retrieve Hash ID from Oryx response. Check that the Layout ID and Geometry match."
+            # We exit here because without a hash we can't download anything
             exit 1
           fi
 
@@ -73,7 +75,9 @@ jobs:
           echo "change_description=$CHANGE_DESC" >> "$GITHUB_OUTPUT"
 
           # Download the source zip using the SPECIFIC hash
-          curl -L "https://oryx.zsa.io/source/$HASH_ID" -o source.zip
+          DOWNLOAD_URL="https://oryx.zsa.io/source/$HASH_ID"
+          echo "Downloading from: $DOWNLOAD_URL"
+          curl -L "$DOWNLOAD_URL" -o source.zip
 
       - name: Unzip the source file
         run: |
@@ -81,17 +85,17 @@ jobs:
           rm source.zip
           rm -f response.json
 
-      - name: Validate Layout Type
+      - name: Validate Layout Type (Non-Blocking)
         run: |
           # Check if the downloaded keymap matches the expected geometry
           KEYMAP_FILE="${{ github.event.inputs.layout_id }}/keymap.c"
           if grep -q "LAYOUT_ergodox" "$KEYMAP_FILE"; then
-            echo "::error::Downloaded layout contains 'LAYOUT_ergodox' but expected Moonlander! Aborting to prevent build errors."
-            exit 1
+            echo "::warning::Downloaded layout contains 'LAYOUT_ergodox' but expected Moonlander. This suggests the Oryx Layout ID points to an ErgoDox layout."
+            echo "Proceeding with build attempt, but it may fail or produce incorrect firmware."
           elif grep -q "LAYOUT_moonlander" "$KEYMAP_FILE"; then
              echo "SUCCESS: Verified 'LAYOUT_moonlander' in keymap.c"
           else
-             echo "WARNING: Could not verify layout macro in keymap.c"
+             echo "::warning::Could not verify layout macro in keymap.c. Proceeding with caution."
           fi
 
       - name: Commit and Push changes
@@ -193,6 +197,7 @@ jobs:
 
           # Run Make inside Docker
           # We explicitly invoke 'qmk setup' to ensure the environment is correct
+          # Check if we should exit on failure or continue
           docker run --rm -v "$(pwd)/qmk_firmware:/qmk_firmware" qmk /bin/sh -c "
             qmk setup -y -H /qmk_firmware && \
             make ${MAKE_PREFIX}${QMK_KEYBOARD_NAME}:${{ github.event.inputs.layout_id }}

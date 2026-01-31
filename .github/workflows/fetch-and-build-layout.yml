@@ -39,51 +39,42 @@ jobs:
           QUERY='query getLayout($hashId: String!, $revisionId: String!, $geometry: String!) { layout(hashId: $hashId, revisionId: $revisionId, geometry: $geometry) { revision { hashId, qmkVersion, changeDescription } } }'
           VARIABLES="{\"hashId\":\"${{ github.event.inputs.layout_id }}\",\"revisionId\":\"latest\",\"geometry\":\"${{ github.event.inputs.layout_geometry }}\"}"
           
-          # We use jq to construct the JSON payload correctly to avoid quoting issues
+          # Construct JSON payload
           PAYLOAD=$(jq -n --arg q "$QUERY" --arg v "$VARIABLES" '{query: $q, variables: $v|fromjson}')
           
-          RESPONSE=$(curl --location --silent --show-error 'https://oryx.zsa.io/graphql' \
+          # Fetch metadata from Oryx
+          curl --location --silent --show-error 'https://oryx.zsa.io/graphql' \
             --header 'Content-Type: application/json' \
-            --data "$PAYLOAD")
+            --data "$PAYLOAD" > response.json
 
-          # Parse with Python to get values and handle errors
-          # We capture the hash_id to a file to use it in the curl command immediately
-          echo "$RESPONSE" | python3 -c "
-          import sys, json
-          try:
-              data = json.load(sys.stdin)
-              rev = data['data']['layout']['revision']
-              print(f\"firmware_version={int(rev['qmkVersion'])}\")
-              print(f\"change_description={rev['changeDescription'] or 'Manual build'}\")
-              print(f\"hash_id={rev['hashId']}\")
-              
-              # Write specific hash to a temp file for the shell to read
-              with open('latest_hash.txt', 'w') as f:
-                  f.write(rev['hashId'])
-                  
-          except Exception as e:
-              print(f\"Error parsing Oryx response: {e}\", file=sys.stderr)
-              # Fallback
-              print('firmware_version=24')
-              print('change_description=Fallback build')
-              print(f'hash_id=${{ github.event.inputs.layout_id }}')
-              with open('latest_hash.txt', 'w') as f:
-                  f.write('${{ github.event.inputs.layout_id }}')
-          " >> "$GITHUB_OUTPUT"
+          # Extract values using jq (safer than python one-liners)
+          # Use -r for raw output (no quotes around strings)
+          HASH_ID=$(jq -r '.data.layout.revision.hashId' response.json)
+          FIRMWARE_VERSION=$(jq -r '.data.layout.revision.qmkVersion' response.json)
+          CHANGE_DESC=$(jq -r '.data.layout.revision.changeDescription // "Manual build"' response.json)
 
-          # Read the specific hash we just parsed
-          LATEST_HASH=$(cat latest_hash.txt)
-          echo "Downloading specific revision hash: $LATEST_HASH"
+          # Verify we got a hash (if null/empty, something went wrong)
+          if [ "$HASH_ID" == "null" ] || [ -z "$HASH_ID" ]; then
+            echo "::error::Failed to retrieve Hash ID from Oryx response. Response content:"
+            cat response.json
+            exit 1
+          fi
 
-          # Download the source zip using the SPECIFIC hash, not the generic input ID
-          # This ensures we get the Moonlander version if the ID is ambiguous
-          curl -L "https://oryx.zsa.io/source/$LATEST_HASH" -o source.zip
+          echo "Found Hash ID: $HASH_ID"
+          echo "Firmware Version: $FIRMWARE_VERSION"
+          
+          # Set outputs
+          echo "firmware_version=$FIRMWARE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "change_description=$CHANGE_DESC" >> "$GITHUB_OUTPUT"
+
+          # Download the source zip using the SPECIFIC hash
+          curl -L "https://oryx.zsa.io/source/$HASH_ID" -o source.zip
 
       - name: Unzip the source file
         run: |
           unzip -oj source.zip '*_source/*' -d ${{ github.event.inputs.layout_id }}
           rm source.zip
-          rm -f latest_hash.txt
+          rm -f response.json
 
       - name: Commit and Push changes
         env:

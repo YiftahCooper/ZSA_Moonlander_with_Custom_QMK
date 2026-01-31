@@ -45,7 +45,8 @@ jobs:
             --header 'Content-Type: application/json' \
             --data "$PAYLOAD")
 
-          # Parse with Python for reliability
+          # Parse with Python to get values and handle errors
+          # We capture the hash_id to a file to use it in the curl command immediately
           echo "$RESPONSE" | python3 -c "
           import sys, json
           try:
@@ -54,21 +55,34 @@ jobs:
               print(f\"firmware_version={int(rev['qmkVersion'])}\")
               print(f\"change_description={rev['changeDescription'] or 'Manual build'}\")
               print(f\"hash_id={rev['hashId']}\")
+              
+              # Write specific hash to a temp file for the shell to read
+              with open('latest_hash.txt', 'w') as f:
+                  f.write(rev['hashId'])
+                  
           except Exception as e:
               print(f\"Error parsing Oryx response: {e}\", file=sys.stderr)
-              # Fallback to defaults if API fails
+              # Fallback
               print('firmware_version=24')
               print('change_description=Fallback build')
-              print('hash_id=${{ github.event.inputs.layout_id }}')
+              print(f'hash_id=${{ github.event.inputs.layout_id }}')
+              with open('latest_hash.txt', 'w') as f:
+                  f.write('${{ github.event.inputs.layout_id }}')
           " >> "$GITHUB_OUTPUT"
 
-          # Download the source zip
-          curl -L "https://oryx.zsa.io/source/${{ github.event.inputs.layout_id }}" -o source.zip
+          # Read the specific hash we just parsed
+          LATEST_HASH=$(cat latest_hash.txt)
+          echo "Downloading specific revision hash: $LATEST_HASH"
+
+          # Download the source zip using the SPECIFIC hash, not the generic input ID
+          # This ensures we get the Moonlander version if the ID is ambiguous
+          curl -L "https://oryx.zsa.io/source/$LATEST_HASH" -o source.zip
 
       - name: Unzip the source file
         run: |
           unzip -oj source.zip '*_source/*' -d ${{ github.event.inputs.layout_id }}
           rm source.zip
+          rm -f latest_hash.txt
 
       - name: Commit and Push changes
         env:

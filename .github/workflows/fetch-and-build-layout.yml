@@ -11,12 +11,12 @@ on:
         description: "Keyboard type"
         type: choice
         options:
-          - moonlander
           - moonlander/reva
           - moonlander/revb
           - planck_ez
           - planck_ez/glow
-        default: moonlander
+          - moonlander
+        default: moonlander/reva
 
 permissions:
   contents: write
@@ -36,7 +36,6 @@ jobs:
         id: download-layout-source
         run: |
           # Use a clear GraphQL query to fetch version info
-          # We prefer the generic 'moonlander' geometry key if provided, as the API might handle revisions internally
           GEOMETRY="${{ github.event.inputs.layout_geometry }}"
           
           echo "Fetching layout for Geometry: $GEOMETRY"
@@ -44,7 +43,7 @@ jobs:
           QUERY='query getLayout($hashId: String!, $revisionId: String!, $geometry: String!) { layout(hashId: $hashId, revisionId: $revisionId, geometry: $geometry) { revision { hashId, qmkVersion, changeDescription } } }'
           VARIABLES="{\"hashId\":\"${{ github.event.inputs.layout_id }}\",\"revisionId\":\"latest\",\"geometry\":\"$GEOMETRY\"}"
           
-          # Construct JSON payload
+          # Construct JSON payload using jq
           PAYLOAD=$(jq -n --arg q "$QUERY" --arg v "$VARIABLES" '{query: $q, variables: $v|fromjson}')
           
           # Fetch metadata from Oryx
@@ -60,7 +59,7 @@ jobs:
           FIRMWARE_VERSION=$(jq -r '.data.layout.revision.qmkVersion' response.json)
           CHANGE_DESC=$(jq -r '.data.layout.revision.changeDescription // "Manual build"' response.json)
 
-          # Verify we got a hash (if null/empty, something went wrong)
+          # Verify we got a hash
           if [ "$HASH_ID" == "null" ] || [ -z "$HASH_ID" ]; then
             echo "::error::Failed to retrieve Hash ID from Oryx response. Check that the Layout ID and Geometry match."
             exit 1
@@ -85,11 +84,11 @@ jobs:
       - name: Validate Layout Type
         run: |
           # Check if the downloaded keymap matches the expected geometry
-          if grep -q "LAYOUT_ergodox" ${{ github.event.inputs.layout_id }}/keymap.c; then
-            echo "::error::Downloaded layout contains 'LAYOUT_ergodox' but expected Moonlander! The Layout ID might be incorrect or the API returned the wrong version."
-            # We don't exit 1 here to allow you to see the file, but we warn heavily
-            echo "WARNING: This appears to be an ErgoDox layout."
-          elif grep -q "LAYOUT_moonlander" ${{ github.event.inputs.layout_id }}/keymap.c; then
+          KEYMAP_FILE="${{ github.event.inputs.layout_id }}/keymap.c"
+          if grep -q "LAYOUT_ergodox" "$KEYMAP_FILE"; then
+            echo "::error::Downloaded layout contains 'LAYOUT_ergodox' but expected Moonlander! Aborting to prevent build errors."
+            exit 1
+          elif grep -q "LAYOUT_moonlander" "$KEYMAP_FILE"; then
              echo "SUCCESS: Verified 'LAYOUT_moonlander' in keymap.c"
           else
              echo "WARNING: Could not verify layout macro in keymap.c"
@@ -179,23 +178,21 @@ jobs:
             MAKE_PREFIX=""
           fi
           
-          echo "Using keyboard directory: $KEYBOARD_DIR"
+          # Strip geometry variant (e.g., 'moonlander/reva' -> 'moonlander')
+          # This ensures we match the folder name in QMK
+          QMK_KEYBOARD_NAME=$(echo "${{ github.event.inputs.layout_geometry }}" | cut -d'/' -f1)
+          
+          TARGET_KEYBOARD_DIR="${KEYBOARD_DIR}/${QMK_KEYBOARD_NAME}/keymaps"
+          
+          echo "Using keyboard directory: $TARGET_KEYBOARD_DIR"
 
           # Prepare Layout Directory
-          mkdir -p "${KEYBOARD_DIR}/${{ github.event.inputs.layout_geometry }}/keymaps"
-          rm -rf "${KEYBOARD_DIR}/${{ github.event.inputs.layout_geometry }}/keymaps/${{ github.event.inputs.layout_id }}"
-          cp -r "${{ github.event.inputs.layout_id }}" "${KEYBOARD_DIR}/${{ github.event.inputs.layout_geometry }}/keymaps/${{ github.event.inputs.layout_id }}"
+          mkdir -p "$TARGET_KEYBOARD_DIR"
+          rm -rf "${TARGET_KEYBOARD_DIR}/${{ github.event.inputs.layout_id }}"
+          cp -r "${{ github.event.inputs.layout_id }}" "${TARGET_KEYBOARD_DIR}/${{ github.event.inputs.layout_id }}"
 
           # Run Make inside Docker
           # We explicitly invoke 'qmk setup' to ensure the environment is correct
-          # Note: We use 'moonlander' generic folder name for build if input was moonlander
-          # But QMK expects 'moonlander' usually.
-          
-          # Map geometry input to QMK folder name if needed
-          # For Moonlander, it's just 'moonlander'
-          # We strip '/reva' etc for the make command if it's there
-          QMK_KEYBOARD_NAME=$(echo "${{ github.event.inputs.layout_geometry }}" | cut -d'/' -f1)
-          
           docker run --rm -v "$(pwd)/qmk_firmware:/qmk_firmware" qmk /bin/sh -c "
             qmk setup -y -H /qmk_firmware && \
             make ${MAKE_PREFIX}${QMK_KEYBOARD_NAME}:${{ github.event.inputs.layout_id }}

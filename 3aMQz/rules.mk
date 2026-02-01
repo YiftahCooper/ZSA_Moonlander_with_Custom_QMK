@@ -1,8 +1,8 @@
-# Set any rules.mk overrides for your specific keymap here.
-# See rules at https://docs.qmk.fm/#/config_options?id=the-rulesmk-file
-LTO_ENABLE = yes
 CONSOLE_ENABLE = no
 COMMAND_ENABLE = no
-WEBUSB_ENABLE = yes
+AUTO_SHIFT_ENABLE = yes
+MOUSEKEY_ENABLE = no
 ORYX_ENABLE = yes
-RGBLIGHT_ENABLE = no
+RGB_MATRIX_CUSTOM_KB = yes
+TAP_DANCE_ENABLE = yes
+SPACE_CADET_ENABLE = no

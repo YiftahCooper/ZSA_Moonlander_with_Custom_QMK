@@ -8,12 +8,13 @@ on:
         required: true
         default: "3aMQz"
       layout_geometry:
-        description: "Moonlander hardware revision (must match Oryx/QMK geometry)"
+        description: "Moonlander geometry (use moonlander to auto-detect)"
         type: choice
         options:
+          - moonlander
           - moonlander/reva
           - moonlander/revb
-        default: moonlander/revb
+        default: moonlander
 
 permissions:
   contents: write
@@ -36,24 +37,44 @@ jobs:
           set -euo pipefail
 
           LAYOUT_ID="${{ github.event.inputs.layout_id }}"
-          GEOMETRY="${{ github.event.inputs.layout_geometry }}"
+          GEOMETRY_INPUT="${{ github.event.inputs.layout_geometry }}"
 
-          # Upstream query shape: revision { hashId, qmkVersion, title }
-          payload=$(jq -n --arg hid "$LAYOUT_ID" --arg geo "$GEOMETRY" --arg rev "latest" '{
-            query: "query getLayout($hashId: String!, $revisionId: String!, $geometry: String) { layout(hashId: $hashId, geometry: $geometry, revisionId: $revisionId) { revision { hashId, qmkVersion, title }}}",
-            variables: { hashId: $hid, geometry: $geo, revisionId: $rev }
-          }')
+          candidates=()
+          if [[ "$GEOMETRY_INPUT" == "moonlander" ]]; then
+            candidates=("moonlander/reva" "moonlander/revb")
+          else
+            candidates=("$GEOMETRY_INPUT")
+          fi
 
-          curl -fsSL 'https://oryx.zsa.io/graphql' \
-            -H 'Content-Type: application/json' \
-            --data "$payload" > response.json
+          resolved_geometry=""
+          hash_id=""
+          qmk_version=""
+          title=""
 
-          hash_id=$(jq -r '.data.layout.revision.hashId' response.json)
-          qmk_version=$(jq -r '.data.layout.revision.qmkVersion' response.json)
-          title=$(jq -r '.data.layout.revision.title // empty' response.json)
+          for geo in "${candidates[@]}"; do
+            echo "Checking geometry: $geo..."
+            payload=$(jq -n --arg hid "$LAYOUT_ID" --arg geo "$geo" --arg rev "latest" '{
+              query: "query getLayout($hashId: String!, $revisionId: String!, $geometry: String) { layout(hashId: $hashId, geometry: $geometry, revisionId: $revisionId) { revision { hashId, qmkVersion, title }}}",
+              variables: { hashId: $hid, geometry: $geo, revisionId: $rev }
+            }')
 
-          if [[ -z "$hash_id" || "$hash_id" == "null" ]]; then
-            echo "::error::Oryx returned null hashId. Check layout visibility and that geometry matches (moonlander/reva vs moonlander/revb)."
+            curl -fsSL 'https://oryx.zsa.io/graphql' \
+              -H 'Content-Type: application/json' \
+              --data "$payload" > response.json
+
+            hash_id=$(jq -r '.data.layout.revision.hashId' response.json)
+            if [[ -n "$hash_id" && "$hash_id" != "null" ]]; then
+              resolved_geometry="$geo"
+              qmk_version=$(jq -r '.data.layout.revision.qmkVersion' response.json)
+              title=$(jq -r '.data.layout.revision.title // empty' response.json)
+              echo "Found matching geometry: $geo with hash $hash_id"
+              break
+            fi
+            echo "No match for geometry: $geo"
+          done
+
+          if [[ -z "$resolved_geometry" ]]; then
+            echo "::error::Oryx returned null hashId for all candidate geometries. Check that layout ID is correct and public."
             jq -c '.errors? // empty' response.json || true
             exit 1
           fi
@@ -63,6 +84,7 @@ jobs:
 
           curl -fsSL "https://oryx.zsa.io/source/${hash_id}" -o source.zip
 
+          echo "resolved_geometry=$resolved_geometry" >> "$GITHUB_OUTPUT"
           echo "firmware_version=$firmware_version" >> "$GITHUB_OUTPUT"
           echo "change_description=$change_description" >> "$GITHUB_OUTPUT"
 
@@ -132,7 +154,21 @@ jobs:
           git push origin main
 
       - name: Build qmk docker image
-        run: docker build -t qmk .
+        run: |
+           cat > Dockerfile <<'EOF'
+           FROM ubuntu:22.04
+           ENV DEBIAN_FRONTEND=noninteractive
+           RUN apt-get update && apt-get install -y --no-install-recommends \
+               ca-certificates curl git build-essential python3 python3-pip \
+               gcc-arm-none-eabi binutils-arm-none-eabi dfu-util unzip \
+               libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib \
+             && apt-get clean && rm -rf /var/lib/apt/lists/*
+           COPY qmk_firmware/requirements.txt /tmp/requirements.txt
+           RUN pip3 install --no-cache-dir qmk && \
+               pip3 install --no-cache-dir -r /tmp/requirements.txt
+           WORKDIR /qmk_firmware
+           EOF
+           docker build -t qmk .
 
       - name: Build the layout
         id: build-layout
@@ -141,7 +177,7 @@ jobs:
           set -euo pipefail
 
           LAYOUT_ID="${{ github.event.inputs.layout_id }}"
-          GEOMETRY="${{ github.event.inputs.layout_geometry }}"
+          GEOMETRY="${{ steps.download-layout-source.outputs.resolved_geometry }}"
           FIRMWARE_VERSION="${{ steps.download-layout-source.outputs.firmware_version }}"
 
           # Follow upstream: for firmware >= 24, keyboard path is under keyboards/zsa and make prefix is zsa/
@@ -158,8 +194,8 @@ jobs:
           mkdir -p "${keyboard_directory}/${GEOMETRY}/keymaps"
           cp -r "${LAYOUT_ID}" "${keyboard_directory}/${GEOMETRY}/keymaps/${LAYOUT_ID}"
 
-          docker run --rm -v "$(pwd)/qmk_firmware:/root" qmk /bin/sh -c "
-            qmk setup zsa/qmk_firmware -b firmware${FIRMWARE_VERSION} -y
+          docker run --rm -v "$(pwd)/qmk_firmware:/qmk_firmware" qmk /bin/sh -c "
+            qmk setup -y -H /qmk_firmware && \
             make ${make_prefix}${GEOMETRY}:${LAYOUT_ID}
           "
 

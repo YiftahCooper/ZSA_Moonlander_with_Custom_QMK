@@ -1,0 +1,96 @@
+name: Build Manual Layout
+
+on:
+  workflow_dispatch:
+    inputs:
+      firmware_version:
+        description: "ZSA Firmware Version (e.g. 24)"
+        required: true
+        default: "24"
+
+jobs:
+  build-manual:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Update QMK firmware submodule (ZSA Fork)
+        run: |
+          git submodule update --init --remote --depth=1 --no-single-branch
+          cd qmk_firmware
+          git remote set-url origin https://github.com/zsa/qmk_firmware.git
+          git fetch origin
+          
+          # Checkout specific firmware branch
+          TARGET_BRANCH="firmware${{ inputs.firmware_version }}"
+          echo "Checking out ZSA branch: $TARGET_BRANCH"
+          
+          git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH" || {
+             echo "Branch $TARGET_BRANCH not found, using default."
+          }
+          git submodule update --init --recursive
+
+      - name: Create QMK Dockerfile
+        run: |
+          cat > Dockerfile <<'EOF'
+          FROM ubuntu:22.04
+          ENV DEBIAN_FRONTEND=noninteractive
+          
+          # Install toolchain and basic dependencies
+          RUN apt-get update && apt-get install -y --no-install-recommends \
+              ca-certificates curl git build-essential python3 python3-pip \
+              gcc-arm-none-eabi binutils-arm-none-eabi dfu-util unzip \
+              libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib \
+            && apt-get clean && rm -rf /var/lib/apt/lists/*
+          
+          # Copy requirements from the submodule
+          COPY qmk_firmware/requirements.txt /tmp/requirements.txt
+          
+          # Install QMK CLI and firmware requirements
+          RUN pip3 install --no-cache-dir qmk && \
+              pip3 install --no-cache-dir -r /tmp/requirements.txt
+          
+          WORKDIR /qmk_firmware
+          EOF
+
+      - name: Build qmk docker image
+        run: docker build -t qmk .
+
+      - name: Compile Layout
+        id: compile
+        run: |
+          # Determine paths based on firmware version logic
+          if [ "${{ inputs.firmware_version }}" -ge 24 ]; then
+            BASE_KB_DIR="qmk_firmware/keyboards/zsa"
+            MAKE_TARGET="zsa/moonlander"
+          else
+            BASE_KB_DIR="qmk_firmware/keyboards"
+            MAKE_TARGET="moonlander"
+          fi
+          
+          # Ensure target directory exists
+          mkdir -p "$BASE_KB_DIR/moonlander/keymaps"
+          
+          # Copy our local '3aMQz' folder to the keymaps directory
+          # We force the name to be the ID so make finds it
+          rm -rf "$BASE_KB_DIR/moonlander/keymaps/3aMQz"
+          cp -r 3aMQz "$BASE_KB_DIR/moonlander/keymaps/3aMQz"
+          
+          echo "Compiling..."
+          docker run --rm -v "$(pwd)/qmk_firmware:/qmk_firmware" qmk /bin/sh -c "
+            qmk setup -y -H /qmk_firmware && \
+            make ${MAKE_TARGET}:3aMQz
+          "
+          
+          # Find artifact
+          BUILT_FILE=$(find ./qmk_firmware -type f -regex ".*moonlander.*\.\(bin\|hex\)" -print -quit)
+          echo "built_file=$BUILT_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: moonlander_3aMQz_custom_firmware
+          path: ${{ steps.compile.outputs.built_file }}

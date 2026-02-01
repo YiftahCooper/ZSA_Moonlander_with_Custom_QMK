@@ -125,7 +125,8 @@ jobs:
           set -euo pipefail
           git fetch origin main
           git checkout -B main origin/main
-          git merge -Xignore-all-space oryx
+          # Use "theirs" strategy to prioritize the fresh Oryx download + patches over any old state in main
+          git merge -X theirs oryx
           git push origin main
 
       - name: Update QMK firmware submodule (match Oryx qmkVersion)
